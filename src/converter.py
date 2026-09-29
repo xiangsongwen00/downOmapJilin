@@ -3,10 +3,16 @@ import os
 from pathlib import Path
 import sys
 
-qgis_root = Path(sys.executable).resolve().parents[2]
-proj_data = qgis_root / "share" / "proj"
-if (proj_data / "proj.db").is_file():
-    os.environ["PROJ_DATA"] = str(proj_data)
+environment_root = Path(sys.prefix)
+proj_data = environment_root / "Library" / "share" / "proj"
+if not (proj_data / "proj.db").is_file():
+    import pyproj
+    proj_data = Path(pyproj.datadir.get_data_dir())
+os.environ["PROJ_LIB"] = str(proj_data)
+os.environ["PROJ_DATA"] = str(proj_data)
+gdal_data = environment_root / "Library" / "share" / "gdal"
+if gdal_data.is_dir():
+    os.environ["GDAL_DATA"] = str(gdal_data)
 
 from osgeo import gdal, osr
 

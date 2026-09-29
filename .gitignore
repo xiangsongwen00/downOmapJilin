@@ -1,3 +1,11 @@
 out
 .vscode
 *.zip
+dist
+*ou*t*
+build
+*__pycache__
+0-checkbuildpy/app_settings.json
+0-checkbuildpy/*_audit.json
+0-checkbuildpy/*_audit.html
+0-checkbuildpy/gui_preview.png

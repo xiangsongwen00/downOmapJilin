@@ -1,12 +1,14 @@
 # 奥维 18 级影像自动导出
 
-在已登录的 Windows 桌面打开奥维后，运行：
+在已登录的 Windows 桌面运行，打开配置窗口：
 
 ```powershell
 & 'D:\App\python_env\gis312\python.exe' .\index.py
 ```
 
-本机的 `python` 命令没有配置到 PATH，所以直接使用 `config.json` 指定的解释器，无需 QGIS。程序最大化奥维，按目标图层名称寻找属性窗口，逐块导出 18 级 TIF，处理“已有地图缓存”和“先下载地图”两种分支。全部 TIF 校验通过后，按原始要素拼接并裁切。导出和下载可能需要较长时间，保持 Windows 桌面会话登录且不操作奥维。
+配置窗口读取 `config.json`，修改后点击“确定并保存”会写回该文件；“保存并运行”会启动自动流程，“仅重新拼接”不操作奥维。本机的 `python` 命令没有配置到 PATH，所以直接使用 `gis312` 解释器，无需 QGIS。命令行直接运行自动流程可加 `--run`。
+
+自动流程会启动或最大化奥维，先查找当前已存在的目标树；找到并核对所有子目标后直接复用，确实不存在才导入。随后按目标图层名称逐块导出 18 级 TIF，处理“已有地图缓存”和“先下载地图”两种分支。全部 TIF 校验通过后，按原始要素拼接并裁切。运行时保持 Windows 桌面会话登录且不操作奥维。
 
 ## 配置
 
@@ -21,6 +23,10 @@
 | `mosaic_dir` | 最终各原始图斑 TIF 与 `mosaic_ledger.json` 的目录。 |
 | `max_attempts` | 每块 UI 导出失败后的最大尝试次数。 |
 | `mosaic` | 是否在全部导出并校验后拼接。自定义目标且不需要按原始图斑拼接时设为 `false`。 |
+
+## MSVC + Nuitka 构建
+
+在工程目录运行 `build_msvc.bat`，或运行 `& 'D:\App\python_env\gis312\python.exe' .\build_msvc.py`。构建脚本会调用 VS 2022 BuildTools 的 `vcvars64.bat`，通过 Conda 激活 `D:\App\python_env\gis312`，再调用 Nuitka 的 standalone 模式。产物位于 `build\msvc\index.dist\OviExporter.exe`，同目录的 `config.json` 可直接编辑。安装 Nuitka 的命令是 `& 'D:\App\python_env\gis312\python.exe' -m pip install Nuitka`。
 
 默认 `target` 是 `out/grid_3km_z18_buffer20.geojson`：在原来 40 块网格各自完成分配后，沿边界向外扩 20 米，让相邻导出块有重叠；最终 TIF 仍按原始 7 个图斑裁切。新块名称带 `_buf20p0m`，可以与已经导入奥维的旧网格并存。新导出写入 `out/vip_parts_buffer20`，新拼接结果写入 `out/features_z18_buffer20`；旧的 40 块 TIF 和 7 个成果保留。修改 `plan_buffer_meters` 或原始图斑后，须重新生成目标并使用新的 `export_dir`，旧目标的断点不能直接沿用。SHP 和 GeoPackage 会先转为 `prepared_target` 指定的 WGS84 GeoJSON，再导入奥维。SHP 需保留同名的 `.shx`、`.dbf`、`.prj` 文件；无坐标系的目标会报错。
 

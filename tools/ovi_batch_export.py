@@ -102,20 +102,25 @@ def button(dialog, name):
 
 
 def imported_folder(window, folder_name, expected_names):
-    tree_names = {c.window_text() for c in window.descendants(control_type="TreeItem")}
     folders = [c for c in window.descendants(control_type="TreeItem")
                if c.window_text() == folder_name]
     if not folders:
         return None
-    folder = one(folders, folder_name)
-    if not expected_names.issubset(tree_names):
-        folder = one((c for c in window.descendants(control_type="TreeItem")
-                      if c.window_text() == folder_name), folder_name)
+    for folder in folders:
         if folder.iface_expand_collapse.CurrentExpandCollapseState == 0:
             folder.iface_expand_collapse.Expand()
-    wait_until(lambda: expected_names.issubset({
-        c.window_text() for c in window.descendants(control_type="TreeItem")}))
-    return folder
+    def ready_folder():
+        for folder in window.descendants(control_type="TreeItem"):
+            if folder.window_text() != folder_name:
+                continue
+            children = {item.window_text() for item in folder.descendants(control_type="TreeItem")}
+            if expected_names.issubset(children):
+                return folder
+        return None
+    try:
+        return wait_until(ready_folder)
+    except TimeoutError as exc:
+        raise RuntimeError(f"Ovi already has {folder_name}, but its target items are incomplete") from exc
 
 
 def import_plan(window, path, folder_name, expected_names):
@@ -155,15 +160,17 @@ def property_menu_item():
     return found[0][1] if len(found) == 1 else None
 
 
-def open_property(window, name):
+def open_property(window, name, folder_name):
     maximize(window)
     for _ in range(3):
         send_keys("{ESC}")
-        target = one((c for c in window.descendants(control_type="TreeItem")
+        folder = imported_folder(window, folder_name, {name})
+        target = one((c for c in folder.descendants(control_type="TreeItem")
                       if c.window_text() == name), f"grid tree item {name}")
         target.iface_scroll_item.ScrollIntoView()
         time.sleep(0.3)
-        target = one((c for c in window.descendants(control_type="TreeItem")
+        folder = imported_folder(window, folder_name, {name})
+        target = one((c for c in folder.descendants(control_type="TreeItem")
                       if c.window_text() == name), f"visible grid tree item {name}")
         tree = target.parent().parent().parent()
         bounds, viewport = target.rectangle(), tree.rectangle()
@@ -428,9 +435,9 @@ def verify_tif(path, feature=None):
         return result
 
 
-def export_one(window, feature, destination, timeout, download_timeout):
+def export_one(window, feature, destination, timeout, download_timeout, folder_name):
     name = feature["properties"]["name"]
-    props = open_property(window, name)
+    props = open_property(window, name, folder_name)
     button(props, "高级").click_input()
     advanced = wait_until(lambda: child_dialog(window, "图形高级功能"))
     button(advanced, "导出成图片").click_input()
@@ -506,7 +513,10 @@ def run(args):
     recover_ui(window)
     folder_name = f"{args.plan.stem}[{len(names)}]"
     if imported_folder(window, folder_name, set(names)) is None:
+        print(f"Target tree absent: {folder_name}; importing", flush=True)
         import_plan(window, args.plan, folder_name, set(names))
+    else:
+        print(f"Target tree already exists: {folder_name}; reusing", flush=True)
     print(f"Grid import ready: {folder_name}; planned exports: {len(features)}", flush=True)
     for index, feature in enumerate(features, 1):
         name = feature["properties"]["name"]
@@ -535,7 +545,8 @@ def run(args):
                 recover_ui(window)
                 archive_existing(output)
                 print(f"[{index}/{len(features)}] exporting {name}; attempt {attempt}", flush=True)
-                result = export_one(window, feature, output, args.timeout, args.download_timeout)
+                result = export_one(window, feature, output, args.timeout,
+                                    args.download_timeout, folder_name)
                 break
             except Exception as exc:
                 print(f"[{index}/{len(features)}] attempt {attempt} failed: {exc}", flush=True)

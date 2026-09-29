@@ -17,7 +17,20 @@ import traceback
 from types import SimpleNamespace
 
 
-ROOT = Path(__file__).resolve().parent
+PACKAGED = "__compiled__" in globals()
+EXECUTABLE = Path(sys.argv[0]).resolve() if PACKAGED else Path(sys.executable).resolve()
+ROOT = EXECUTABLE.parent if PACKAGED else Path(__file__).resolve().parent
+DLL_HANDLES = []
+if PACKAGED and os.name == "nt":
+    dll_directories = [ROOT / name for name in ("pyogrio.libs", "rasterio.libs")]
+    dll_directories = [path for path in dll_directories if path.is_dir()]
+    os.environ["PATH"] = os.pathsep.join(
+        [*(str(path) for path in dll_directories), os.environ.get("PATH", "")])
+    DLL_HANDLES = [os.add_dll_directory(str(path)) for path in dll_directories]
+    proj_directory = ROOT / "pyproj" / "proj_dir" / "share" / "proj"
+    if proj_directory.is_dir():
+        os.environ["PROJ_LIB"] = str(proj_directory)
+        os.environ["PROJ_DATA"] = str(proj_directory)
 
 
 def project_path(value):
@@ -51,8 +64,8 @@ def single_instance(path):
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def load_config(path):
-    config = json.loads(path.read_text(encoding="utf-8-sig"))
+def resolve_config(config):
+    config = dict(config)
     required = {"python", "omapexepath", "target", "export_dir", "source_features", "mosaic_dir"}
     missing = required - config.keys()
     if missing:
@@ -61,7 +74,8 @@ def load_config(path):
         raise ValueError("This workflow requires level 18 and TIF")
     if config.get("coordinate_system", "default") != "default":
         raise ValueError("Coordinate system must remain the Ovi default")
-    for key in ("export_timeout_seconds", "download_timeout_seconds", "max_attempts"):
+    for key in ("startup_timeout_seconds", "export_timeout_seconds",
+                "download_timeout_seconds", "max_attempts"):
         if int(config.get(key, 3)) < 1:
             raise ValueError(f"{key} must be positive")
     for key in required - {"python"}:
@@ -73,6 +87,10 @@ def load_config(path):
     config["state_file"] = project_path(config.get("state_file", "out/ovi_pipeline_state.json"))
     config["lock_file"] = project_path(config.get("lock_file", "out/ovi_pipeline.lock"))
     return config
+
+
+def load_config(path):
+    return resolve_config(json.loads(path.read_text(encoding="utf-8-sig")))
 
 
 def ensure_ovi_running(config):
@@ -219,19 +237,26 @@ def main():
     action.add_argument("--check", action="store_true", help="Validate configuration and current ledger without UI")
     action.add_argument("--prepare", action="store_true", help="Prepare importable target without UI")
     action.add_argument("--mosaic-only", action="store_true", help="Rebuild final feature TIFs from existing exports without Ovi")
+    action.add_argument("--run", action="store_true", help="Run the configured export without opening the settings window")
     args = parser.parse_args()
     config_path = args.config.resolve()
+    if not (args.check or args.prepare or args.mosaic_only or args.run):
+        from src.config_gui import launch_gui
+        launch_gui(config_path)
+        return 0
     config = load_config(config_path)
     desired_python = config["python"]
     if not desired_python.is_file():
         raise FileNotFoundError(f"gis312 Python not found: {desired_python}")
-    if Path(sys.executable).resolve() != desired_python.resolve():
+    if not PACKAGED and Path(sys.executable).resolve() != desired_python.resolve():
         return subprocess.call([str(desired_python), str(Path(__file__).resolve()),
                                 "--config", str(config_path),
                                 *(["--check"] if args.check else []),
                                 *(["--prepare"] if args.prepare else []),
-                                *(["--mosaic-only"] if args.mosaic_only else [])], cwd=ROOT)
-    sys.stdout.reconfigure(encoding="utf-8")
+                                *(["--mosaic-only"] if args.mosaic_only else []),
+                                *(["--run"] if args.run else [])], cwd=ROOT)
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(encoding="utf-8")
     with single_instance(config["lock_file"]):
         try:
             run(config, check_only=args.check, prepare_only=args.prepare,
