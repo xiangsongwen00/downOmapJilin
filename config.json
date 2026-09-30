@@ -15,5 +15,55 @@
   "max_attempts": 3,
   "mosaic": true,
   "state_file": "out2/ovi_pipeline_buffer20_state.json",
-  "lock_file": "out2/ovi_pipeline.lock"
+  "lock_file": "out2/ovi_pipeline.lock",
+  "python": "D:/App/python_env/gis312/python.exe",
+  "basemap_menu": [
+    {
+      "name": "天地图",
+      "enabled": true
+    },
+    {
+      "name": "天地图影像",
+      "enabled": true
+    },
+    {
+      "name": "天地图影像+等高线",
+      "enabled": true
+    },
+    {
+      "name": "天地图+官方海图数据服务",
+      "enabled": true
+    },
+    {
+      "name": "吉林一号卫星图(全国2025)",
+      "enabled": true
+    },
+    {
+      "name": "吉林一号卫星图(全球)",
+      "enabled": true
+    },
+    {
+      "name": "吉林一号季度卫星图(2026)",
+      "enabled": true
+    },
+    {
+      "name": "四维地球卫星影像图(2025)",
+      "enabled": true
+    },
+    {
+      "name": "四维地球日新图",
+      "enabled": true
+    },
+    {
+      "name": "世纪空间卫星影像图(2025)",
+      "enabled": true
+    },
+    {
+      "name": "腾讯电子地图",
+      "enabled": true
+    }
+  ],
+  "basemap_checked_year": 2026,
+  "basemap_id": "tianditu_imagery",
+  "basemap_resolved_label": "天地图影像"
 }

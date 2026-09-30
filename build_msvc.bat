@@ -14,7 +14,10 @@ python -m nuitka ^
   --msvc=latest ^
   --enable-plugin=tk-inter ^
   --windows-console-mode=force ^
+  --windows-icon-from-ico=src\logo\logo.ico ^
   --include-data-files=config.json=config.json ^
+  --include-data-files=src/logo/logo.ico=src/logo/logo.ico ^
+  --include-data-files=src/logo/logo.png=src/logo/logo.png ^
   --include-package=pyogrio ^
   --include-package=rasterio ^
   --include-package=comtypes ^

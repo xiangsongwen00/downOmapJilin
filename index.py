@@ -49,31 +49,33 @@ def atomic_json(path, value):
 @contextmanager
 def single_instance(path):
     path.parent.mkdir(parents=True, exist_ok=True)
+    cleanup_lock_files(path)
     owner_path = Path(str(path) + ".owner.json")
-    with path.open("a+b") as handle:
-        handle.seek(0)
-        if not handle.read(1):
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError as exc:
-            owner = _lock_owner(owner_path)
-            detail = f" (PID {owner['pid']})" if owner and owner.get("pid") else ""
-            raise RuntimeError(
-                f"Another Ovi export process{detail} is still running. "
-                "Wait for it to finish or stop it before resuming. "
-                f"Lock: {path}") from exc
-        try:
-            atomic_json(owner_path, {"pid": os.getpid(), "executable": str(EXECUTABLE),
-                                     "started_at": datetime.now().astimezone().isoformat()})
-            yield
-        finally:
-            if (_lock_owner(owner_path) or {}).get("pid") == os.getpid():
-                owner_path.unlink(missing_ok=True)
+    try:
+        with path.open("a+b") as handle:
             handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            if not handle.read(1):
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                owner = _lock_owner(owner_path)
+                detail = f" (PID {owner['pid']})" if owner and owner.get("pid") else ""
+                raise RuntimeError(
+                    f"Another Ovi export process{detail} is still running. "
+                    "Wait for it to finish or stop it before resuming. "
+                    f"Lock: {path}") from exc
+            try:
+                atomic_json(owner_path, {"pid": os.getpid(), "executable": str(EXECUTABLE),
+                                         "started_at": datetime.now().astimezone().isoformat()})
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        cleanup_lock_files(path)
 
 
 def _lock_owner(path):
@@ -96,6 +98,21 @@ def active_instance(path):
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         return None
+
+
+def cleanup_lock_files(path):
+    """Remove only our lock artifacts after the OS lock has been released."""
+    owner_path = Path(str(path) + ".owner.json")
+    for _ in range(10):
+        if active_instance(path) is not None:
+            return False
+        try:
+            path.unlink(missing_ok=True)
+            owner_path.unlink(missing_ok=True)
+            return True
+        except PermissionError:
+            time.sleep(0.1)
+    return False
 
 
 def resolve_config(config, base=ROOT):
@@ -125,7 +142,9 @@ def resolve_config(config, base=ROOT):
 
 
 def load_config(path):
-    return resolve_config(json.loads(path.read_text(encoding="utf-8-sig")), path.resolve().parent)
+    config = resolve_config(json.loads(path.read_text(encoding="utf-8-sig")), path.resolve().parent)
+    config["_config_path"] = path.resolve()
+    return config
 
 
 def ensure_ovi_running(config):
@@ -183,7 +202,7 @@ def _plan_is_current(path, source_hash, buffer_meters):
     )
 
 
-def _seed_compatible_exports(current_plan, output_dir, previous_plans):
+def _seed_compatible_exports(current_plan, output_dir, previous_plans, basemap_key):
     """Reuse only verified TIFs whose target geometry and metadata are unchanged."""
     from shapely.geometry import shape
     from tools.ovi_batch_export import verify_tif
@@ -194,7 +213,8 @@ def _seed_compatible_exports(current_plan, output_dir, previous_plans):
     output_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = output_dir / "ovi_export_ledger.json"
     ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
-    if ledger and ledger.get("plan_sha256") != plan_hash:
+    if ledger and (ledger.get("plan_sha256") != plan_hash
+                   or ledger.get("basemap_key") != basemap_key):
         raise RuntimeError(f"New export directory belongs to another target: {output_dir}")
     completed = dict(ledger.get("completed", {}))
     for previous_plan, previous_dir in previous_plans:
@@ -231,7 +251,8 @@ def _seed_compatible_exports(current_plan, output_dir, previous_plans):
             completed[name] = result
             print(f"Reused verified TIF: {name}", flush=True)
     if completed:
-        atomic_json(ledger_path, {"plan_sha256": plan_hash, "completed": completed})
+        atomic_json(ledger_path, {"plan_sha256": plan_hash,
+                                  "basemap_key": basemap_key, "completed": completed})
     return len(completed)
 
 
@@ -269,14 +290,36 @@ def _resolve_buffered_plan(config):
     config["target"] = current
     config["export_dir"] = config["export_dir"].with_name(config["export_dir"].name + suffix)
     config["mosaic_dir"] = config["mosaic_dir"].with_name(config["mosaic_dir"].name + suffix)
-    reused = _seed_compatible_exports(current, config["export_dir"], previous)
+    reused = (_seed_compatible_exports(current, config["export_dir"], previous,
+                                       config["basemap_key"])
+              if "basemap_key" in config else 0)
     print(f"Versioned export directory: {config['export_dir']}; reused TIFs: {reused}", flush=True)
+
+
+def configure_basemap(config):
+    from src.basemaps import resolve_basemap
+
+    family = config.get("basemap_id")
+    if not family:
+        raise RuntimeError("尚未选择下载底图。请打开配置窗口，读取奥维“地图切换”菜单并选择底图。")
+    menu = config.get("basemap_menu", [])
+    if not menu:
+        raise RuntimeError("尚未读取奥维底图菜单。请在配置窗口填写奥维 EXE 路径后点击“确定并保存”。")
+    choice = resolve_basemap(family, menu)
+    suffix = f"_map_{choice.key}"
+    config["export_dir"] = config["export_dir"].with_name(config["export_dir"].name + suffix)
+    config["mosaic_dir"] = config["mosaic_dir"].with_name(config["mosaic_dir"].name + suffix)
+    config["basemap_key"] = choice.key
+    print(f"Basemap: {choice.label}; output key: {choice.key}", flush=True)
+    return choice
 
 
 def run(config, check_only=False, prepare_only=False, mosaic_only=False):
     if not config["source_features"].is_file():
         raise FileNotFoundError(config["source_features"])
     from src.target_input import prepare_target
+
+    choice = None if prepare_only else configure_basemap(config)
 
     if "plan_buffer_meters" in config:
         _resolve_buffered_plan(config)
@@ -288,7 +331,8 @@ def run(config, check_only=False, prepare_only=False, mosaic_only=False):
     export_dir = config["export_dir"]
     ledger_file = export_dir / "ovi_export_ledger.json"
     ledger = json.loads(ledger_file.read_text(encoding="utf-8")) if ledger_file.exists() else {}
-    if ledger and ledger.get("plan_sha256") != plan_hash:
+    if ledger and (ledger.get("plan_sha256") != plan_hash
+                   or (choice is not None and ledger.get("basemap_key") != choice.key)):
         raise RuntimeError("Target differs from existing export ledger; use a new export_dir")
     completed = len(set(names) & set(ledger.get("completed", {})))
     print(f"Target: {target}; polygons: {len(features)}; ledger: {completed}/{len(features)}", flush=True)
@@ -304,6 +348,7 @@ def run(config, check_only=False, prepare_only=False, mosaic_only=False):
             timeout=int(config.get("export_timeout_seconds", 900)),
             download_timeout=int(config.get("download_timeout_seconds", 900)),
             max_attempts=int(config.get("max_attempts", 3)),
+            basemap=choice,
         ))
     from tools.ovi_batch_export import verify_tif
     rasters = []
@@ -316,15 +361,17 @@ def run(config, check_only=False, prepare_only=False, mosaic_only=False):
     if config.get("mosaic", True):
         from src.raster_features import export_raster_features
         from src.raster_features import _load_features
-        signature_data = ["ovi-alpha>=128-v2", plan_hash,
+        signature_data = ["ovi-alpha>=128-v2", choice.key, plan_hash,
                           hashlib.sha256(config["source_features"].read_bytes()).hexdigest()]
         signature_data.extend(f"{p.name}:{p.stat().st_size}:{p.stat().st_mtime_ns}" for p in rasters)
         signature = hashlib.sha256("|".join(signature_data).encode("utf-8")).hexdigest()
         mosaic_dir = config["mosaic_dir"]
         ledger_path = mosaic_dir / "mosaic_ledger.json"
         mosaic_ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
-        if mosaic_ledger.get("input_signature") != signature:
-            mosaic_ledger = {"input_signature": signature, "completed": {}}
+        if (mosaic_ledger.get("input_signature") != signature
+                or mosaic_ledger.get("basemap_key") != choice.key):
+            mosaic_ledger = {"input_signature": signature,
+                             "basemap_key": choice.key, "completed": {}}
         feature_count = sum(1 for _ in _load_features(config["source_features"]))
         report(config, "mosaicking", source_count=len(rasters), features=feature_count)
         for ordinal in range(1, feature_count + 1):

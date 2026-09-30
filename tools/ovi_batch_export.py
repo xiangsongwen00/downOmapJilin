@@ -516,6 +516,9 @@ def export_one(window, feature, destination, timeout, download_timeout, folder_n
 
 
 def run(args):
+    choice = getattr(args, "basemap", None)
+    if choice is None:
+        raise ValueError("必须先通过 index.py 配置并选择允许下载的底图")
     plan_bytes = args.plan.read_bytes()
     plan_hash = hashlib.sha256(plan_bytes).hexdigest()
     features = json.loads(plan_bytes)["features"]
@@ -533,10 +536,13 @@ def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
     ledger_path = args.output / "ovi_export_ledger.json"
     ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
-    if ledger and ledger.get("plan_sha256") != plan_hash:
-        raise RuntimeError("Target geometry changed; archive the old ledger explicitly before a new run")
+    if ledger and (ledger.get("plan_sha256") != plan_hash
+                   or ledger.get("basemap_key") != choice.key):
+        raise RuntimeError("Target or basemap differs from existing export ledger; use a separate output directory")
     if not ledger:
-        ledger = {"plan_sha256": plan_hash, "completed": {}}
+        if any(args.output.glob("*.tif")):
+            raise RuntimeError("Existing TIFs have no basemap ledger; use a separate output directory")
+        ledger = {"plan_sha256": plan_hash, "basemap_key": choice.key, "completed": {}}
     window = main_window()
     maximize(window)
     recover_ui(window)
@@ -547,6 +553,10 @@ def run(args):
     else:
         print(f"Target tree already exists: {folder_name}; reusing", flush=True)
     print(f"Grid import ready: {folder_name}; planned exports: {len(features)}", flush=True)
+    from tools.ovi_basemap import ensure_basemap
+
+    ensure_basemap(window, choice)
+    print(f"Basemap selected: {choice.label}", flush=True)
     for index, feature in enumerate(features, 1):
         name = feature["properties"]["name"]
         output = args.output / f"{name}.tif"
@@ -572,6 +582,7 @@ def run(args):
         for attempt in range(1, getattr(args, "max_attempts", 3) + 1):
             try:
                 recover_ui(window)
+                ensure_basemap(window, choice)
                 archive_existing(output)
                 print(f"[{index}/{len(features)}] exporting {name}; attempt {attempt}", flush=True)
                 result = export_one(window, feature, output, args.timeout,

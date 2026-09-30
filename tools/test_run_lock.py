@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from index import active_instance, single_instance
+from index import active_instance, cleanup_lock_files, single_instance
 from src.config_gui import ConfigWindow
 
 
@@ -37,14 +37,20 @@ class RunLockTests(unittest.TestCase):
             worker = self.start_worker(lock)
             try:
                 self.assertEqual(active_instance(lock)["pid"], worker.pid)
+                self.assertFalse(cleanup_lock_files(lock))
+                self.assertTrue(lock.exists())
             finally:
                 worker.terminate()
                 worker.communicate(timeout=10)
             self.assertTrue(lock.exists())
             self.assertIsNone(active_instance(lock))
+            self.assertTrue(cleanup_lock_files(lock))
+            self.assertFalse(lock.exists())
+            self.assertFalse(Path(str(lock) + ".owner.json").exists())
             with single_instance(lock):
                 self.assertEqual(active_instance(lock)["pid"], os.getpid())
             self.assertIsNone(active_instance(lock))
+            self.assertFalse(lock.exists())
 
     def test_stop_button_can_stop_a_worker_from_an_earlier_window(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -67,10 +73,29 @@ class RunLockTests(unittest.TestCase):
             try:
                 self.assertTrue(ConfigWindow.stop(Window()))
                 self.assertIsNone(active_instance(lock))
+                self.assertFalse(lock.exists())
+                self.assertFalse(Path(str(lock) + ".owner.json").exists())
             finally:
                 if worker.poll() is None:
                     worker.terminate()
                 worker.communicate(timeout=10)
+
+    def test_window_close_runs_stop_before_destroy(self):
+        calls = []
+
+        class Root:
+            def destroy(self):
+                calls.append("destroy")
+
+        class Window:
+            root = Root()
+
+            def stop(self):
+                calls.append("stop")
+                return True
+
+        ConfigWindow.on_close(Window())
+        self.assertEqual(calls, ["stop", "destroy"])
 
 
 if __name__ == "__main__":
