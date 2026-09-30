@@ -33,9 +33,12 @@ NUMBER_FIELDS = (
 
 class ConfigWindow:
     def __init__(self, root: tk.Tk, config_path: Path):
+        from index import PACKAGED
+
         self.root = root
         self.config_path = config_path
         self.raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        self.path_fields = tuple(field for field in PATH_FIELDS if field[0] != "python" or not PACKAGED)
         self.values: dict[str, tk.StringVar] = {}
         self.messages: queue.Queue[str | None] = queue.Queue()
         self.process: subprocess.Popen | None = None
@@ -54,7 +57,7 @@ class ConfigWindow:
         notebook.add(paths, text="路径")
         notebook.add(options, text="参数")
         paths.columnconfigure(1, weight=1)
-        for row, (key, label, kind) in enumerate(PATH_FIELDS):
+        for row, (key, label, kind) in enumerate(self.path_fields):
             ttk.Label(paths, text=label, width=18).grid(row=row, column=0, sticky="w", pady=4)
             var = tk.StringVar(value=str(self.raw.get(key, "")))
             self.values[key] = var
@@ -119,15 +122,20 @@ class ConfigWindow:
         if self.process is not None and self.process.poll() is None:
             messagebox.showerror("任务正在运行", "请等待当前任务结束后再修改配置。")
             return False
-        from index import atomic_json, resolve_config
+        from index import PACKAGED, atomic_json, resolve_config
 
         data = dict(self.raw)
         try:
-            for key, _, _ in PATH_FIELDS:
+            for key, _, _ in self.path_fields:
                 value = self.values[key].get().strip()
-                if not value:
+                if not value and key != "python":
                     raise ValueError(f"{key} 不能为空")
-                data[key] = value
+                if value:
+                    data[key] = value
+                else:
+                    data.pop(key, None)
+            if PACKAGED:
+                data.pop("python", None)
             for key, _, _ in NUMBER_FIELDS:
                 data[key] = int(self.values[key].get().strip())
             if self.generated.get():
@@ -136,8 +144,8 @@ class ConfigWindow:
                 data.pop("plan_buffer_meters", None)
             data["mosaic"] = self.mosaic.get()
             data.update(zoom=18, format="tif", coordinate_system="default")
-            resolved = resolve_config(data)
-            if not resolved["python"].is_file():
+            resolved = resolve_config(data, self.config_path.resolve().parent)
+            if not PACKAGED and "python" in resolved and not resolved["python"].is_file():
                 raise FileNotFoundError(f"Python 不存在：{resolved['python']}")
             if not resolved["source_features"].is_file():
                 raise FileNotFoundError(f"原始要素不存在：{resolved['source_features']}")

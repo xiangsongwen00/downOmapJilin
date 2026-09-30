@@ -18,7 +18,6 @@ import xml.etree.ElementTree as ET
 
 
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "build", "dist", "release", "node_modules"}
-GIS_PACKAGES = {"rasterio", "pyogrio", "fiona", "pyproj", "geopandas", "shapely", "osgeo"}
 # These are review rules, not claims that Nuitka always requires an explicit flag.
 DYNAMIC_RULES = {
     "rasterio": ("rasterio.serde", "Rasterio loads internal modules dynamically"),
@@ -27,8 +26,6 @@ DYNAMIC_RULES = {
     "comtypes": ("comtypes.stream", "pywinauto UIA loads COM modules dynamically"),
     "pywinauto": ("pywinauto", "UIA backends select modules at runtime"),
 }
-IMPORT_ALIASES = {"win32con": "pywin32", "win32gui": "pywin32", "win32api": "pywin32",
-                  "pythoncom": "pywin32", "PIL": "Pillow", "cv2": "opencv-python", "osgeo": "GDAL"}
 VALUE_OPTIONS = {"--include-package", "--include-module", "--include-package-data",
                  "--include-data-files", "--include-data-dir", "--user-package-configuration-file",
                  "--output-dir", "--output-filename", "--report", "--enable-plugin",
@@ -289,7 +286,6 @@ def audit(build: Path, entry: Path | None = None, root: Path | None = None,
     opts = parsed["options"]
     packages = _included(opts, "--include-package")
     modules = _included(opts, "--include-module")
-    data = _included(opts, "--include-package-data")
     entry_imports = scan_imports(root, entry)
     entry_seen = set(entry_imports["external"])
     explicit_local = [p for p in project_files if any(
@@ -354,7 +350,7 @@ def audit(build: Path, entry: Path | None = None, root: Path | None = None,
             # A package may be imported by a third-party package or chosen dynamically.
             add("review", package, "No direct import found in reachable project files. Check the compilation report and runtime use before removing this flag.",
                 files=[])
-        elif package not in DYNAMIC_RULES and package not in GIS_PACKAGES:
+        elif package not in DYNAMIC_RULES:
             add("review", package, "Direct imports are normally followed in standalone mode. This broad include may add unused modules; verify before removal.")
     if "geopandas" in seen and "pyogrio" not in packages and "fiona" not in packages:
         add("review", "GIS engine", "Neither GeoPandas file IO engine is explicitly included. Verify the selected engine in the build environment.",
@@ -412,7 +408,7 @@ def audit(build: Path, entry: Path | None = None, root: Path | None = None,
                 report_status = "已过期"
                 add("review", "编译报告", "报告早于构建脚本或项目源码；需重新打包后再核对。")
             else:
-                report_status = "已核对"
+                report_status = "模块已核对"
                 report_modules = _report_modules(report_path)
     if report_modules is not None:
         if not report_modules:
@@ -464,10 +460,12 @@ def render_text(result: dict[str, Any]) -> str:
              f"Entry-reachable files: {result['summary']['reachable_files']}",
              f"Project files selected for build: {result['summary']['packaged_files']}",
              f"Project Python files: {result['project_inventory']['files']}",
+             f"Compilation report: {result['report_status']}",
              "\nNuitka arguments:", "  " + " ".join(build["arguments"]),
-             "\nExternal imports:"]
-    lines += [f"  {name}: {', '.join(files)}" for name, files in result["imports"]["external"].items()
-              if name not in sys.stdlib_module_names]
+             "\nDependency comparison:"]
+    lines += [f"  {item['module']}: {item['inclusion']}; Python {item['environment']}; "
+              f"report {item['report']}; {', '.join(item['sources'])}"
+              for item in result["coverage"]]
     lines.append("\nImports outside build graph:")
     lines += [f"  {name}: {', '.join(result['project_inventory']['external'][name])}"
               for name in result["project_inventory"]["unreachable"]]
@@ -490,9 +488,11 @@ def render_html(result: dict[str, Any]) -> str:
             "<h1>Nuitka dependency audit</h1><p>Static review; verify findings against a packaged runtime test.</p>"
             "<h2>Build command</h2><pre>" + html.escape(" ".join(result["build"]["arguments"])) + "</pre>"
             "<h2>Findings</h2><table><tr><th>Level</th><th>Package</th><th>Reason</th><th>Suggestion</th></tr>"
-            + rows + "</table><h2>External imports</h2><pre>" +
-            html.escape("\n".join(f"{k}: {', '.join(v)}" for k, v in result["imports"]["external"].items()
-                                  if k not in sys.stdlib_module_names)) + "</pre><h2>Outside build graph</h2><pre>" +
+            + rows + "</table><h2>Compilation report: " + html.escape(result["report_status"]) +
+            "</h2><h2>Dependency comparison</h2><pre>" +
+            html.escape("\n".join(f"{item['module']}: {item['inclusion']}; Python {item['environment']}; "
+                                  f"report {item['report']}; {', '.join(item['sources'])}"
+                                  for item in result["coverage"])) + "</pre><h2>Outside build graph</h2><pre>" +
             html.escape("\n".join(f"{k}: {', '.join(result['project_inventory']['external'][k])}"
                                   for k in result["project_inventory"]["unreachable"])) + "</pre>")
 

@@ -24,6 +24,19 @@ class BuildAuditTests(unittest.TestCase):
             self.assertIn("--include-package=pyogrio", suggestions)
             self.assertNotIn("--include-package=rasterio", suggestions)
 
+    def test_flag_without_value_does_not_consume_entry_and_missing_report_is_visible(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "index.py").write_text("import json\n", encoding="utf-8")
+            (root / "build.bat").write_text(
+                "python -m nuitka ^\n --standalone ^\n --report=build/report.xml ^\n"
+                " --assume-yes-for-downloads ^\n index.py\n", encoding="utf-8")
+            result = audit(root / "build.bat")
+            self.assertEqual(result["build"]["options"]["--assume-yes-for-downloads"], [""])
+            self.assertEqual(result["build"]["entry"], "index.py")
+            self.assertEqual(result["report_status"], "等待构建")
+            self.assertTrue(any(item["subject"] == "编译报告" for item in result["findings"]))
+
     def test_python_list_fstrings_and_report(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

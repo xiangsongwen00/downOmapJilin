@@ -10,6 +10,7 @@ import json
 import msvcrt
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -33,9 +34,9 @@ if PACKAGED and os.name == "nt":
         os.environ["PROJ_DATA"] = str(proj_directory)
 
 
-def project_path(value):
+def project_path(value, base=ROOT):
     path = Path(value).expanduser()
-    return path if path.is_absolute() else ROOT / path
+    return path if path.is_absolute() else base / path
 
 
 def atomic_json(path, value):
@@ -64,9 +65,9 @@ def single_instance(path):
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def resolve_config(config):
+def resolve_config(config, base=ROOT):
     config = dict(config)
-    required = {"python", "omapexepath", "target", "export_dir", "source_features", "mosaic_dir"}
+    required = {"omapexepath", "target", "export_dir", "source_features", "mosaic_dir"}
     missing = required - config.keys()
     if missing:
         raise ValueError(f"Missing config fields: {sorted(missing)}")
@@ -78,19 +79,20 @@ def resolve_config(config):
                 "download_timeout_seconds", "max_attempts"):
         if int(config.get(key, 3)) < 1:
             raise ValueError(f"{key} must be positive")
-    for key in required - {"python"}:
-        config[key] = project_path(config[key])
-    config["python"] = project_path(config["python"])
+    for key in required:
+        config[key] = project_path(config[key], base)
+    if config.get("python") and not PACKAGED:
+        config["python"] = project_path(config["python"], base)
     if not config["omapexepath"].is_file():
         raise FileNotFoundError(f"Ovi executable not found: {config['omapexepath']}")
-    config["prepared_target"] = project_path(config.get("prepared_target", "out/ovi_import_target.geojson"))
-    config["state_file"] = project_path(config.get("state_file", "out/ovi_pipeline_state.json"))
-    config["lock_file"] = project_path(config.get("lock_file", "out/ovi_pipeline.lock"))
+    config["prepared_target"] = project_path(config.get("prepared_target", "out/ovi_import_target.geojson"), base)
+    config["state_file"] = project_path(config.get("state_file", "out/ovi_pipeline_state.json"), base)
+    config["lock_file"] = project_path(config.get("lock_file", "out/ovi_pipeline.lock"), base)
     return config
 
 
 def load_config(path):
-    return resolve_config(json.loads(path.read_text(encoding="utf-8-sig")))
+    return resolve_config(json.loads(path.read_text(encoding="utf-8-sig")), path.resolve().parent)
 
 
 def ensure_ovi_running(config):
@@ -137,30 +139,114 @@ def validate_plan(plan):
     return features
 
 
+def _plan_is_current(path, source_hash, buffer_meters):
+    if not path.is_file():
+        return False
+    features = json.loads(path.read_text(encoding="utf-8-sig")).get("features", [])
+    return bool(features) and all(
+        float(item.get("properties", {}).get("buffer_meters", -1)) == buffer_meters
+        and item["properties"].get("source_sha256") == source_hash
+        for item in features
+    )
+
+
+def _seed_compatible_exports(current_plan, output_dir, previous_plans):
+    """Reuse only verified TIFs whose target geometry and metadata are unchanged."""
+    from shapely.geometry import shape
+    from tools.ovi_batch_export import verify_tif
+
+    current_features = json.loads(current_plan.read_text(encoding="utf-8"))["features"]
+    current = {item["properties"]["name"]: item for item in current_features}
+    plan_hash = hashlib.sha256(current_plan.read_bytes()).hexdigest()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ledger_path = output_dir / "ovi_export_ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+    if ledger and ledger.get("plan_sha256") != plan_hash:
+        raise RuntimeError(f"New export directory belongs to another target: {output_dir}")
+    completed = dict(ledger.get("completed", {}))
+    for previous_plan, previous_dir in previous_plans:
+        if previous_plan == current_plan or not previous_plan.is_file() or not previous_dir.is_dir():
+            continue
+        old = json.loads(previous_plan.read_text(encoding="utf-8"))["features"]
+        for item in old:
+            name = item["properties"]["name"]
+            if name not in current or name in completed:
+                continue
+            new = current[name]
+            properties = lambda feature: {key: value for key, value in feature["properties"].items()
+                                          if key != "source_sha256"}
+            if properties(item) != properties(new) or not shape(item["geometry"]).equals_exact(
+                    shape(new["geometry"]), tolerance=1e-12):
+                continue
+            source_tif = previous_dir / f"{name}.tif"
+            if not source_tif.is_file():
+                continue
+            try:
+                result = verify_tif(source_tif, new)
+            except (OSError, RuntimeError):
+                continue
+            destination = output_dir / source_tif.name
+            if destination.exists():
+                try:
+                    result = verify_tif(destination, new)
+                except (OSError, RuntimeError):
+                    continue
+            else:
+                temporary = destination.with_suffix(".tif.tmp")
+                shutil.copy2(source_tif, temporary)
+                os.replace(temporary, destination)
+            completed[name] = result
+            print(f"Reused verified TIF: {name}", flush=True)
+    if completed:
+        atomic_json(ledger_path, {"plan_sha256": plan_hash, "completed": completed})
+    return len(completed)
+
+
+def _resolve_buffered_plan(config):
+    from src.export_plan import make_plan
+
+    buffer_meters = float(config["plan_buffer_meters"])
+    if buffer_meters < 0:
+        raise ValueError("plan_buffer_meters must be nonnegative")
+    base = config["target"]
+    if base.suffix.lower() not in {".geojson", ".json"}:
+        raise ValueError("Generated buffered target must be GeoJSON")
+    source_hash = hashlib.sha256(config["source_features"].read_bytes()).hexdigest()
+    if _plan_is_current(base, source_hash, buffer_meters):
+        return
+    if not base.exists():
+        counts = make_plan(config["source_features"], base, buffer_meters)
+        print(f"Generated buffered target: {base}; parts: {counts}", flush=True)
+        return
+
+    # Preserve the old plan, ledger, and Ovi folder. A distinct filename gives
+    # the changed geometry a distinct imported tree even if its part count is unchanged.
+    signature = hashlib.sha256(f"{source_hash}:{buffer_meters}".encode()).hexdigest()[:12]
+    suffix = f"_src{signature}"
+    current = base.with_name(base.stem + suffix + base.suffix)
+    if not current.exists():
+        counts = make_plan(config["source_features"], current, buffer_meters)
+        print(f"Source changed; generated versioned target: {current}; parts: {counts}", flush=True)
+    if not _plan_is_current(current, source_hash, buffer_meters):
+        raise RuntimeError(f"Versioned target is inconsistent: {current}")
+    previous = [(base, config["export_dir"])]
+    for candidate in sorted(base.parent.glob(base.stem + "_src*" + base.suffix)):
+        old_suffix = candidate.stem[len(base.stem):]
+        previous.append((candidate, config["export_dir"].with_name(config["export_dir"].name + old_suffix)))
+    config["target"] = current
+    config["export_dir"] = config["export_dir"].with_name(config["export_dir"].name + suffix)
+    config["mosaic_dir"] = config["mosaic_dir"].with_name(config["mosaic_dir"].name + suffix)
+    reused = _seed_compatible_exports(current, config["export_dir"], previous)
+    print(f"Versioned export directory: {config['export_dir']}; reused TIFs: {reused}", flush=True)
+
+
 def run(config, check_only=False, prepare_only=False, mosaic_only=False):
     if not config["source_features"].is_file():
         raise FileNotFoundError(config["source_features"])
     from src.target_input import prepare_target
 
     if "plan_buffer_meters" in config:
-        requested_buffer = float(config["plan_buffer_meters"])
-        if requested_buffer < 0:
-            raise ValueError("plan_buffer_meters must be nonnegative")
-        target_path = config["target"]
-        if target_path.suffix.lower() not in {".geojson", ".json"}:
-            raise ValueError("Generated buffered target must be GeoJSON")
-        if not target_path.exists():
-            from src.export_plan import make_plan
-            counts = make_plan(config["source_features"], target_path, requested_buffer)
-            print(f"Generated buffered target: {target_path}; parts: {counts}", flush=True)
-        generated = json.loads(target_path.read_text(encoding="utf-8"))["features"]
-        source_hash = hashlib.sha256(config["source_features"].read_bytes()).hexdigest()
-        if not generated or any(
-            float(feature["properties"].get("buffer_meters", -1)) != requested_buffer
-            or feature["properties"].get("source_sha256") != source_hash
-            for feature in generated
-        ):
-            raise RuntimeError("Buffered target is stale; regenerate it before running")
+        _resolve_buffered_plan(config)
 
     target = prepare_target(config["target"], config["prepared_target"])
     features = validate_plan(target)
@@ -245,10 +331,10 @@ def main():
         launch_gui(config_path)
         return 0
     config = load_config(config_path)
-    desired_python = config["python"]
-    if not desired_python.is_file():
-        raise FileNotFoundError(f"gis312 Python not found: {desired_python}")
-    if not PACKAGED and Path(sys.executable).resolve() != desired_python.resolve():
+    desired_python = config.get("python") if not PACKAGED else None
+    if desired_python is not None and not desired_python.is_file():
+        raise FileNotFoundError(f"Configured Python not found: {desired_python}")
+    if desired_python is not None and Path(sys.executable).resolve() != desired_python.resolve():
         return subprocess.call([str(desired_python), str(Path(__file__).resolve()),
                                 "--config", str(config_path),
                                 *(["--check"] if args.check else []),

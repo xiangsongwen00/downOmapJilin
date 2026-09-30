@@ -28,7 +28,7 @@ python 0-checkbuildpy/src/checkbuildpy.py --build D:\seg_app\runbuild_Nuitka_msv
 - 对 Rasterio、Pyogrio、GeoPandas、Fiona、pywinauto/comtypes 等动态加载场景给出风险提示。包代码、数据文件、原生 DLL 是不同问题；`--include-package-data` 不包含 DLL。
 - 提供编译报告时，检查静态依赖和 `rasterio.serde`、`comtypes.stream` 是否真实收集。没有编译报告时只能作静态预判，不能保证运行时完整性。
 
-建议每次构建都加 `--report=.../compilation-report.xml`，构建后把报告载入工具，再运行一次打包程序的关键功能。
+建议每次构建都加 `--report=.../compilation-report.xml`，构建后把报告载入工具核对模块收集，再运行一次打包程序的关键功能。工具目前不判定原生 DLL 和数据文件的运行可用性。
 
 ## 测试
 
