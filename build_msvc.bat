@@ -20,9 +20,15 @@ python -m nuitka ^
   --include-package=comtypes ^
   --include-package=pywinauto ^
   --report=build\msvc\compilation-report.xml ^
-  --output-dir=build\msvc ^
-  --output-filename=OviExporter.exe ^
+  --output-dir=build\msvc\staging ^
+  --output-filename=jinlinOmap.exe ^
   --jobs=4 ^
   --assume-yes-for-downloads ^
   index.py
-exit /b %errorlevel%
+if errorlevel 1 exit /b %errorlevel%
+
+rem Update binaries without deleting downloaded TIFs, ledgers, or edited config.
+robocopy "build\msvc\staging\index.dist" "build\msvc\index.dist" /E /XF config.json /NFL /NDL /NJH /NJS /NP
+if errorlevel 8 exit /b %errorlevel%
+if not exist "build\msvc\index.dist\config.json" copy /Y "build\msvc\staging\index.dist\config.json" "build\msvc\index.dist\config.json" >nul
+exit /b 0

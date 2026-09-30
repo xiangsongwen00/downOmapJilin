@@ -49,20 +49,53 @@ def atomic_json(path, value):
 @contextmanager
 def single_instance(path):
     path.parent.mkdir(parents=True, exist_ok=True)
+    owner_path = Path(str(path) + ".owner.json")
     with path.open("a+b") as handle:
         handle.seek(0)
-        handle.write(b"0")
-        handle.flush()
+        if not handle.read(1):
+            handle.write(b"0")
+            handle.flush()
         handle.seek(0)
         try:
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
-            raise RuntimeError("Another Ovi index.py process is running") from exc
+            owner = _lock_owner(owner_path)
+            detail = f" (PID {owner['pid']})" if owner and owner.get("pid") else ""
+            raise RuntimeError(
+                f"Another Ovi export process{detail} is still running. "
+                "Wait for it to finish or stop it before resuming. "
+                f"Lock: {path}") from exc
         try:
+            atomic_json(owner_path, {"pid": os.getpid(), "executable": str(EXECUTABLE),
+                                     "started_at": datetime.now().astimezone().isoformat()})
             yield
         finally:
+            if (_lock_owner(owner_path) or {}).get("pid") == os.getpid():
+                owner_path.unlink(missing_ok=True)
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _lock_owner(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def active_instance(path):
+    """Return metadata only while the OS lock is held by another process."""
+    if not path.is_file():
+        return None
+    with path.open("r+b") as handle:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return _lock_owner(Path(str(path) + ".owner.json")) or {"pid": None}
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return None
 
 
 def resolve_config(config, base=ROOT):

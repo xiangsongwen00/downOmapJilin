@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
+import win32api
+import win32con
+import win32gui
+import win32process
 
 
 PATH_FIELDS = (
@@ -31,6 +37,46 @@ NUMBER_FIELDS = (
 )
 
 
+def _export_process(pid: int, executable: Path):
+    """Open only a process running this exact executable."""
+    try:
+        handle = win32api.OpenProcess(
+            win32con.PROCESS_QUERY_INFORMATION | win32con.PROCESS_VM_READ |
+            win32con.PROCESS_TERMINATE, False, pid)
+        image = Path(win32process.GetModuleFileNameEx(handle, 0)).resolve()
+        if os.path.normcase(str(image)) == os.path.normcase(str(executable.resolve())):
+            return handle
+        handle.Close()
+    except OSError:
+        pass
+    return None
+
+
+def _has_visible_window(pid: int):
+    found = []
+
+    def inspect(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd) and win32process.GetWindowThreadProcessId(hwnd)[1] == pid:
+            found.append(hwnd)
+
+    win32gui.EnumWindows(inspect, None)
+    return bool(found)
+
+
+def _legacy_worker_pid(executable: Path):
+    """Find one headless worker from an older build without owner metadata."""
+    matches = []
+    for pid in win32process.EnumProcesses():
+        if pid == os.getpid():
+            continue
+        handle = _export_process(pid, executable)
+        if handle is not None:
+            handle.Close()
+            if not _has_visible_window(pid):
+                matches.append(pid)
+    return matches[0] if len(matches) == 1 else None
+
+
 class ConfigWindow:
     def __init__(self, root: tk.Tk, config_path: Path):
         from index import PACKAGED
@@ -40,7 +86,7 @@ class ConfigWindow:
         self.raw = json.loads(config_path.read_text(encoding="utf-8-sig"))
         self.path_fields = tuple(field for field in PATH_FIELDS if field[0] != "python" or not PACKAGED)
         self.values: dict[str, tk.StringVar] = {}
-        self.messages: queue.Queue[str | None] = queue.Queue()
+        self.messages: queue.Queue[tuple[subprocess.Popen, str | None]] = queue.Queue()
         self.process: subprocess.Popen | None = None
 
         root.title("奥维 18 级 TIF 自动导出")
@@ -122,7 +168,7 @@ class ConfigWindow:
         if self.process is not None and self.process.poll() is None:
             messagebox.showerror("任务正在运行", "请等待当前任务结束后再修改配置。")
             return False
-        from index import PACKAGED, atomic_json, resolve_config
+        from index import PACKAGED, active_instance, atomic_json, resolve_config
 
         data = dict(self.raw)
         try:
@@ -145,6 +191,11 @@ class ConfigWindow:
             data["mosaic"] = self.mosaic.get()
             data.update(zoom=18, format="tif", coordinate_system="default")
             resolved = resolve_config(data, self.config_path.resolve().parent)
+            owner = active_instance(resolved["lock_file"])
+            if owner is not None:
+                pid = f" PID {owner['pid']}" if owner.get("pid") else ""
+                messagebox.showwarning("已有任务", f"导出任务{pid}仍在运行。请先点击“停止任务”，再保存配置。")
+                return False
             if not PACKAGED and "python" in resolved and not resolved["python"].is_file():
                 raise FileNotFoundError(f"Python 不存在：{resolved['python']}")
             if not resolved["source_features"].is_file():
@@ -162,6 +213,8 @@ class ConfigWindow:
         return True
 
     def start(self, action: str):
+        if not self.stop():
+            return
         if not self.save():
             return
         from index import EXECUTABLE, PACKAGED, ROOT
@@ -186,17 +239,19 @@ class ConfigWindow:
     def read_output(self, process: subprocess.Popen):
         assert process.stdout is not None
         for line in process.stdout:
-            self.messages.put(line)
+            self.messages.put((process, line))
         code = process.wait()
-        self.messages.put(f"\n任务结束，退出码：{code}\n")
-        self.messages.put(None)
+        self.messages.put((process, f"\n任务结束，退出码：{code}\n"))
+        self.messages.put((process, None))
 
     def drain_messages(self):
         try:
             while True:
-                message = self.messages.get_nowait()
+                process, message = self.messages.get_nowait()
+                if process is not self.process:
+                    continue
                 if message is None:
-                    code = self.process.returncode if self.process is not None else None
+                    code = process.returncode
                     self.status.set("已完成" if code == 0 else f"失败（退出码 {code}）")
                 else:
                     self.append_log(message)
@@ -211,9 +266,49 @@ class ConfigWindow:
         self.log.configure(state="disabled")
 
     def stop(self):
+        from index import EXECUTABLE, PACKAGED, active_instance, project_path
+
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
             self.status.set("正在停止")
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                messagebox.showerror("停止失败", "当前任务未能在 10 秒内退出。")
+                return False
+        lock_path = project_path(self.values["lock_file"].get().strip(), self.config_path.resolve().parent)
+        owner = active_instance(lock_path)
+        if owner is None:
+            return True
+        pid = owner.get("pid")
+        if pid is None and PACKAGED:
+            pid = _legacy_worker_pid(EXECUTABLE)
+        if not pid:
+            messagebox.showerror("无法确认遗留进程", "运行锁仍被占用，但无法唯一确认导出进程。请在任务管理器检查后重试。")
+            return False
+        handle = _export_process(int(pid), EXECUTABLE)
+        if handle is None:
+            if active_instance(lock_path) is None:
+                return True
+            messagebox.showerror("无法确认遗留进程", f"PID {pid} 持有运行锁，但程序路径与当前 EXE 不一致，已停止启动。")
+            return False
+        try:
+            if active_instance(lock_path) is None:
+                return True
+            win32api.TerminateProcess(handle, 1)
+        except OSError as exc:
+            messagebox.showerror("停止失败", str(exc))
+            return False
+        finally:
+            handle.Close()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if active_instance(lock_path) is None:
+                self.status.set(f"已停止旧任务 PID {pid}；可以续跑")
+                return True
+            time.sleep(0.2)
+        messagebox.showerror("停止失败", f"已结束 PID {pid}，但运行锁仍未释放。")
+        return False
 
 
 def launch_gui(config_path: Path):
