@@ -160,18 +160,47 @@ def property_menu_item():
     return found[0][1] if len(found) == 1 else None
 
 
+def grid_tree_item(window, folder_name, name, timeout=10):
+    """Locate a grid by its ancestry, even when the folder row is scrolled away."""
+    deadline = time.monotonic() + timeout
+    visible_names = visible_folders = 0
+    while time.monotonic() < deadline:
+        items = window.descendants(control_type="TreeItem")
+        candidates = [item for item in items if item.window_text() == name]
+        visible_names = len(candidates)
+        matches = []
+        for candidate in candidates:
+            ancestor = candidate.parent()
+            for _ in range(20):
+                if ancestor is None:
+                    break
+                if ancestor.window_text() == folder_name:
+                    matches.append(candidate)
+                    break
+                ancestor = ancestor.parent()
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError(f"Multiple {name} rows belong to {folder_name}")
+        folders = [item for item in items if item.window_text() == folder_name]
+        visible_folders = len(folders)
+        for folder in folders:
+            if folder.iface_expand_collapse.CurrentExpandCollapseState == 0:
+                folder.iface_expand_collapse.Expand()
+        time.sleep(0.25)
+    raise RuntimeError(
+        f"Cannot locate {name} under {folder_name} in Ovi favorites "
+        f"(visible names: {visible_names}, visible folders: {visible_folders})")
+
+
 def open_property(window, name, folder_name):
     maximize(window)
     for _ in range(3):
         send_keys("{ESC}")
-        folder = imported_folder(window, folder_name, {name})
-        target = one((c for c in folder.descendants(control_type="TreeItem")
-                      if c.window_text() == name), f"grid tree item {name}")
+        target = grid_tree_item(window, folder_name, name)
         target.iface_scroll_item.ScrollIntoView()
         time.sleep(0.3)
-        folder = imported_folder(window, folder_name, {name})
-        target = one((c for c in folder.descendants(control_type="TreeItem")
-                      if c.window_text() == name), f"visible grid tree item {name}")
+        target = grid_tree_item(window, folder_name, name)
         tree = target.parent().parent().parent()
         bounds, viewport = target.rectangle(), tree.rectangle()
         if (bounds.width() < 1 or bounds.height() < 1 or

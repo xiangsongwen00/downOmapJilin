@@ -1,5 +1,4 @@
 {
-  "python": "D:/App/python_env/gis312/python.exe",
   "target": "out2/grid_3km_z18_buffer20.geojson",
   "omapexepath": "D:/App/omap/omap.exe",
   "startup_timeout_seconds": 120,
