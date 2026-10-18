@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from types import SimpleNamespace
@@ -117,7 +118,7 @@ def cleanup_lock_files(path):
 
 def resolve_config(config, base=ROOT):
     config = dict(config)
-    required = {"omapexepath", "target", "export_dir", "source_features", "mosaic_dir"}
+    required = {"omapexepath", "export_dir", "source_features", "mosaic_dir"}
     missing = required - config.keys()
     if missing:
         raise ValueError(f"Missing config fields: {sorted(missing)}")
@@ -135,7 +136,9 @@ def resolve_config(config, base=ROOT):
         config["python"] = project_path(config["python"], base)
     if not config["omapexepath"].is_file():
         raise FileNotFoundError(f"Ovi executable not found: {config['omapexepath']}")
-    config["prepared_target"] = project_path(config.get("prepared_target", "out/ovi_import_target.geojson"), base)
+    config["target"] = base / "out" / "auto_download_grid.geojson"
+    config["prepared_target"] = base / "out" / "ovi_import_target.geojson"
+    config["plan_buffer_meters"] = float(config.get("plan_buffer_meters", 20))
     config["state_file"] = project_path(config.get("state_file", "out/ovi_pipeline_state.json"), base)
     config["lock_file"] = project_path(config.get("lock_file", "out/ovi_pipeline.lock"), base)
     return config
@@ -189,17 +192,6 @@ def validate_plan(plan):
     if any(item["properties"].get("zoom") != 18 for item in features):
         raise ValueError("Target has a level other than 18")
     return features
-
-
-def _plan_is_current(path, source_hash, buffer_meters):
-    if not path.is_file():
-        return False
-    features = json.loads(path.read_text(encoding="utf-8-sig")).get("features", [])
-    return bool(features) and all(
-        float(item.get("properties", {}).get("buffer_meters", -1)) == buffer_meters
-        and item["properties"].get("source_sha256") == source_hash
-        for item in features
-    )
 
 
 def _seed_compatible_exports(current_plan, output_dir, previous_plans, basemap_key):
@@ -265,24 +257,30 @@ def _resolve_buffered_plan(config):
     base = config["target"]
     if base.suffix.lower() not in {".geojson", ".json"}:
         raise ValueError("Generated buffered target must be GeoJSON")
-    source_hash = hashlib.sha256(config["source_features"].read_bytes()).hexdigest()
-    if _plan_is_current(base, source_hash, buffer_meters):
-        return
-    if not base.exists():
-        counts = make_plan(config["source_features"], base, buffer_meters)
-        print(f"Generated buffered target: {base}; parts: {counts}", flush=True)
-        return
+    # Always rebuild from the original vector, including its current CRS and
+    # attributes. Identical bytes preserve existing export checkpoints.
+    base.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=base.parent) as directory:
+        generated = Path(directory) / base.name
+        counts = make_plan(config["source_features"], generated, buffer_meters)
+        plan_bytes = generated.read_bytes()
+        if base.is_file() and base.read_bytes() == plan_bytes:
+            print(f"Regenerated download grid (unchanged): {base}; parts: {counts}", flush=True)
+            return
+        signature = hashlib.sha256(plan_bytes).hexdigest()[:12]
+        suffix = f"_src{signature}"
+        current = base.with_name(base.stem + suffix + base.suffix) if base.exists() else base
+        if current.exists() and current.read_bytes() != plan_bytes:
+            raise RuntimeError(f"Versioned target is inconsistent: {current}")
+        for artifact in generated.parent.glob(generated.stem + ".*"):
+            destination = current.with_suffix(artifact.suffix)
+            os.replace(artifact, destination)
+        print(f"Regenerated download grid: {current}; parts: {counts}", flush=True)
+        if current == base:
+            return
 
     # Preserve the old plan, ledger, and Ovi folder. A distinct filename gives
     # the changed geometry a distinct imported tree even if its part count is unchanged.
-    signature = hashlib.sha256(f"{source_hash}:{buffer_meters}".encode()).hexdigest()[:12]
-    suffix = f"_src{signature}"
-    current = base.with_name(base.stem + suffix + base.suffix)
-    if not current.exists():
-        counts = make_plan(config["source_features"], current, buffer_meters)
-        print(f"Source changed; generated versioned target: {current}; parts: {counts}", flush=True)
-    if not _plan_is_current(current, source_hash, buffer_meters):
-        raise RuntimeError(f"Versioned target is inconsistent: {current}")
     previous = [(base, config["export_dir"])]
     for candidate in sorted(base.parent.glob(base.stem + "_src*" + base.suffix)):
         old_suffix = candidate.stem[len(base.stem):]
@@ -321,8 +319,7 @@ def run(config, check_only=False, prepare_only=False, mosaic_only=False):
 
     choice = None if prepare_only else configure_basemap(config)
 
-    if "plan_buffer_meters" in config:
-        _resolve_buffered_plan(config)
+    _resolve_buffered_plan(config)
 
     target = prepare_target(config["target"], config["prepared_target"])
     features = validate_plan(target)

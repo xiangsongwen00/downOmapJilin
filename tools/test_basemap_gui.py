@@ -31,10 +31,14 @@ class BasemapGuiTests(unittest.TestCase):
             root.withdraw()
             try:
                 window = ConfigWindow(root, config_path)
+                self.assertNotIn("target", window.values)
+                self.assertNotIn("prepared_target", window.values)
                 with patch.object(window, "read_basemap_menu", return_value=MENU) as read:
                     self.assertTrue(window.save())
                     self.assertEqual(read.call_count, 1)
                     first = json.loads(config_path.read_text(encoding="utf-8"))
+                    self.assertNotIn("target", first)
+                    self.assertNotIn("prepared_target", first)
                     self.assertEqual(first["basemap_checked_year"], date.today().year)
                     self.assertNotIn("basemap_id", first)
                     self.assertEqual(len(window.map_tree.get_children()), len(MENU))

@@ -1,10 +1,8 @@
 {
-  "target": "out2/grid_3km_z18_buffer20.geojson",
   "omapexepath": "D:/App/omap/omap.exe",
   "startup_timeout_seconds": 120,
   "plan_buffer_meters": 20.0,
-  "prepared_target": "ou2t/ovi_import_target.geojson",
-  "source_features": "D:\\0-liaoliao\\0-郎酒新项目\\样本区域\\0-合并.geojson",
+  "source_features": "D:/0-liaoliao/0-垫江业务/垫江业务申报数据/砚台镇/砚台镇村界/砚台镇村界.shp",
   "export_dir": "ou2t/vip_parts_buffer202",
   "mosaic_dir": "out2/features_z18_buffer202",
   "zoom": 18,

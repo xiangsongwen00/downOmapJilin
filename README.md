@@ -58,9 +58,8 @@
 
 | 字段 | 用途 |
 | --- | --- |
-| `target` | 下载目标。支持 `.geojson`、`.shp`、`.gpkg`。SHP/GeoJSON 处理所有面；GeoPackage 取第一个包含面的图层中的第一个面。 |
+| `source_features` | 原始范围，支持 `.geojson`、`.shp`、`.gpkg`，按文件中所有面生成下载分块，并按原始范围裁剪最终成果。 |
 | `omapexepath` | 奥维主程序路径；若未发现已运行的 VIP 主窗口，入口自动启动并等待。 |
-| `source_features` | 最终拼接裁切的原始面文件；当前指向 7 个原始图斑。 |
 | `export_dir` | 每块 TIF 与 `ovi_export_ledger.json` 的目录。 |
 | `mosaic_dir` | 最终各原始图斑 TIF 与 `mosaic_ledger.json` 的目录。 |
 | `max_attempts` | 每块 UI 导出失败后的最大尝试次数。 |
@@ -74,7 +73,7 @@
 
 在工程目录运行 `build_msvc.bat`，或运行 `& 'D:\App\python_env\gis312\python.exe' .\build_msvc.py`。构建脚本会调用 VS 2022 BuildTools 的 `vcvars64.bat`，通过 Conda 激活 `D:\App\python_env\gis312`，再调用 Nuitka 的 standalone 模式。产物位于 `build\msvc\index.dist\jinlinOmap.exe`，同目录的 `config.json` 可直接编辑。安装 Nuitka 的命令是 `& 'D:\App\python_env\gis312\python.exe' -m pip install Nuitka`。
 
-默认 `target` 是 `out/grid_3km_z18_buffer20.geojson`：在原来 40 块网格各自完成分配后，沿边界向外扩 20 米，让相邻导出块有重叠；最终 TIF 仍按原始 7 个图斑裁切。新块名称带 `_buf20p0m`，可以与已经导入奥维的旧网格并存。新导出写入 `out/vip_parts_buffer20`，新拼接结果写入 `out/features_z18_buffer20`；旧的 40 块 TIF 和 7 个成果保留。修改 `plan_buffer_meters` 或原始图斑后，须重新生成目标并使用新的 `export_dir`，旧目标的断点不能直接沿用。SHP 和 GeoPackage 会先转为 `prepared_target` 指定的 WGS84 GeoJSON，再导入奥维。SHP 需保留同名的 `.shx`、`.dbf`、`.prj` 文件；无坐标系的目标会报错。
+只需选择“原始要素”，无需配置下载目标。每次运行都会从原始要素重新生成约 3 km 网格，并按 `plan_buffer_meters` 向外缓冲（默认 20 米），让相邻导出块有重叠；最终 TIF 按原始要素裁剪。下载目标由程序固定管理在配置文件旁的 `out/auto_download_grid.geojson`，界面不再显示下载目标、格式转换目标或生成网格开关；旧配置中的 `target`、`prepared_target` 将被忽略，保存配置时会移除。重新生成的分块相同时继续使用已有断点；原始要素或缓冲距离改变时，程序自动使用带签名的目标文件和输出目录，保留旧成果。SHP 需保留同名的 `.shx`、`.dbf`、`.prj` 文件，无坐标系的输入会报错。
 
 检查配置和现有进度，不操作奥维：
 

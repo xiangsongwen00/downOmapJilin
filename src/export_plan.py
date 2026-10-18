@@ -83,13 +83,23 @@ def make_plan(vector_path: Path, output_path: Path, buffer_meters: float = 0):
         raise ValueError("buffer_meters must be nonnegative")
     source_bytes = vector_path.read_bytes()
     source_hash = hashlib.sha256(source_bytes).hexdigest()
-    source = json.loads(source_bytes)
-    if source.get("type") != "FeatureCollection":
-        raise ValueError(f"Expected GeoJSON FeatureCollection: {vector_path}")
+    if vector_path.suffix.lower() in {".geojson", ".json"}:
+        source = json.loads(source_bytes)
+        if source.get("type") != "FeatureCollection":
+            raise ValueError(f"Expected GeoJSON FeatureCollection: {vector_path}")
+        items = source["features"]
+    else:
+        frame = gpd.read_file(vector_path)
+        if frame.crs is None:
+            raise ValueError(f"Missing CRS: {vector_path}")
+        # Read all source features in their original order, matching the final
+        # mosaic's feature indices, and normalize coordinates before gridding.
+        frame = frame.to_crs(4326)
+        items = json.loads(frame.to_json())["features"]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     features = []
     counts = {}
-    for ordinal, item in enumerate(source["features"], 1):
+    for ordinal, item in enumerate(items, 1):
         original = force_2d(_polygonal(shape(item["geometry"])))
         if original.is_empty:
             counts[ordinal] = 0

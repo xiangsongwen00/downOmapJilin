@@ -20,13 +20,11 @@ import win32process
 
 
 PATH_FIELDS = (
-    ("target", "下载目标", "file"),
     ("source_features", "原始要素", "file"),
     ("omapexepath", "奥维程序", "file"),
     ("python", "gis312 Python", "file"),
     ("export_dir", "分块 TIF 目录", "directory"),
     ("mosaic_dir", "最终 TIF 目录", "directory"),
-    ("prepared_target", "格式转换目标", "file"),
     ("state_file", "运行状态文件", "file"),
     ("lock_file", "单实例锁文件", "file"),
 )
@@ -165,8 +163,7 @@ class ConfigWindow:
             row=row, column=2, padx=6)
         self.set_basemap_options(self.raw.get("basemap_menu", []), self.raw.get("basemap_id"))
         row += 1
-        self.generated = tk.BooleanVar(value="plan_buffer_meters" in self.raw)
-        ttk.Checkbutton(options, text="由原始要素生成缓冲网格", variable=self.generated).grid(
+        ttk.Label(options, text="每次运行自动从原始要素生成下载分块").grid(
             row=row, column=0, columnspan=2, sticky="w", pady=6)
         row += 1
         ttk.Label(options, text="网格缓冲（米）").grid(row=row, column=0, sticky="w", pady=5)
@@ -204,12 +201,10 @@ class ConfigWindow:
             selected = filedialog.askdirectory(initialdir=str(initial if initial.is_dir() else initial.parent))
         else:
             selected = filedialog.askopenfilename(initialdir=str(initial.parent), filetypes=[
-                ("目标与要素", "*.geojson *.json *.shp *.gpkg"),
+                ("面要素", "*.gpkg *.geojson *.json *.shp *.kml"),
                 ("程序", "*.exe"), ("所有文件", "*.*")])
         if selected:
             self.values[key].set(selected)
-            if key == "target" and Path(selected).suffix.lower() in {".shp", ".gpkg"}:
-                self.generated.set(False)
 
     def set_basemap_options(self, menu, selected=None):
         from src.basemaps import FAMILIES, resolve_basemap
@@ -327,10 +322,11 @@ class ConfigWindow:
                 data.pop("python", None)
             for key, _, _ in NUMBER_FIELDS:
                 data[key] = int(self.values[key].get().strip())
-            if self.generated.get():
-                data["plan_buffer_meters"] = float(self.values["plan_buffer_meters"].get().strip())
-            else:
-                data.pop("plan_buffer_meters", None)
+            data["plan_buffer_meters"] = float(self.values["plan_buffer_meters"].get().strip())
+            if data["plan_buffer_meters"] < 0:
+                raise ValueError("网格缓冲不能小于 0 米")
+            data.pop("target", None)
+            data.pop("prepared_target", None)
             data["mosaic"] = self.mosaic.get()
             data.update(zoom=18, format="tif", coordinate_system="default")
             resolved = resolve_config(data, self.config_path.resolve().parent)
@@ -345,10 +341,6 @@ class ConfigWindow:
                 raise FileNotFoundError(f"Python 不存在：{resolved['python']}")
             if not resolved["source_features"].is_file():
                 raise FileNotFoundError(f"原始要素不存在：{resolved['source_features']}")
-            if "plan_buffer_meters" not in data and not resolved["target"].is_file():
-                raise FileNotFoundError(f"下载目标不存在：{resolved['target']}")
-            if "plan_buffer_meters" in data and resolved["target"].suffix.lower() not in (".geojson", ".json"):
-                raise ValueError("自动生成缓冲网格时，目标路径必须是 GeoJSON")
             if not data.get("basemap_menu") or data.get("basemap_checked_year") != date.today().year:
                 selected = self.basemap_options.get(self.basemap_value.get()) or data.get("basemap_id")
                 menu = self.read_basemap_menu(resolved["omapexepath"])
