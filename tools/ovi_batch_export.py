@@ -101,26 +101,66 @@ def button(dialog, name):
                 if c.window_text() == name), f"{name} button")
 
 
-def imported_folder(window, folder_name, expected_names):
+class _NativeTreeItem:
+    """A Win32 tree row for cases where UIA omits its folder ancestry."""
+
+    def __init__(self, item):
+        self.item = item
+
+    def right_click_input(self):
+        self.item.click_input(button="right")
+
+
+def _native_folders(window, folder_name):
+    # SysTreeView32 retains collapsed/offscreen nodes even when UIA exposes
+    # only visible rows or reports their parent as the tree itself.
+    try:
+        native = Desktop(backend="win32").window(handle=window.handle)
+        trees = native.descendants(class_name="SysTreeView32")
+        folders = []
+        for tree in trees:
+            if not tree.is_visible():
+                continue
+            pending = list(tree.roots())
+            while pending:
+                item = pending.pop()
+                if item.text() == folder_name:
+                    folders.append(item)
+                else:
+                    pending.extend(item.children())
+        return folders
+    except Exception:
+        # Other Ovi versions may use a non-native tree. Keep UIA available.
+        return []
+
+
+def imported_folder(window, folder_name, expected_names, timeout=15,
+                    wait_for_absent=False):
     folders = [c for c in window.descendants(control_type="TreeItem")
                if c.window_text() == folder_name]
-    if not folders:
+    native_folders = _native_folders(window, folder_name)
+    if not folders and not native_folders and not wait_for_absent:
         return None
-    for folder in folders:
-        if folder.iface_expand_collapse.CurrentExpandCollapseState == 0:
-            folder.iface_expand_collapse.Expand()
     def ready_folder():
+        for folder in _native_folders(window, folder_name):
+            children = {item.text() for item in folder.sub_elements()}
+            if expected_names.issubset(children):
+                return folder
         for folder in window.descendants(control_type="TreeItem"):
             if folder.window_text() != folder_name:
                 continue
+            if folder.iface_expand_collapse.CurrentExpandCollapseState == 0:
+                folder.iface_expand_collapse.Expand()
             children = {item.window_text() for item in folder.descendants(control_type="TreeItem")}
             if expected_names.issubset(children):
                 return folder
         return None
     try:
-        return wait_until(ready_folder)
+        return wait_until(ready_folder, timeout=timeout)
     except TimeoutError as exc:
-        raise RuntimeError(f"Ovi already has {folder_name}, but its target items are incomplete") from exc
+        raise RuntimeError(
+            f"Ovi favorites did not expose {folder_name} with all target items; "
+            "the import is not ready") from exc
 
 
 def import_plan(window, path, folder_name, expected_names):
@@ -148,7 +188,7 @@ def import_plan(window, path, folder_name, expected_names):
         raise RuntimeError("Ovi did not report import success")
     button(success, "确定").click_input()
     wait_until(lambda: child_dialog(window, "omap") is None)
-    imported_folder(window, folder_name, expected_names)
+    imported_folder(window, folder_name, expected_names, wait_for_absent=True)
 
 
 def property_menu_item():
@@ -182,6 +222,12 @@ def grid_tree_item(window, folder_name, name, timeout=10):
             return matches[0]
         if len(matches) > 1:
             raise RuntimeError(f"Multiple {name} rows belong to {folder_name}")
+        native_matches = [item for folder in _native_folders(window, folder_name)
+                          for item in folder.sub_elements() if item.text() == name]
+        if len(native_matches) == 1:
+            return _NativeTreeItem(native_matches[0])
+        if len(native_matches) > 1:
+            raise RuntimeError(f"Multiple {name} rows belong to {folder_name}")
         folders = [item for item in items if item.window_text() == folder_name]
         visible_folders = len(folders)
         for folder in folders:
@@ -198,11 +244,22 @@ def open_property(window, name, folder_name):
     for _ in range(3):
         send_keys("{ESC}")
         target = grid_tree_item(window, folder_name, name)
-        target.iface_scroll_item.ScrollIntoView()
+        if isinstance(target, _NativeTreeItem):
+            target.item.ensure_visible()
+        else:
+            target.iface_scroll_item.ScrollIntoView()
         time.sleep(0.3)
         target = grid_tree_item(window, folder_name, name)
-        tree = target.parent().parent().parent()
-        bounds, viewport = target.rectangle(), tree.rectangle()
+        if isinstance(target, _NativeTreeItem):
+            bounds = target.item.client_rect()
+            viewport = target.item.tree_ctrl.client_rect()
+        else:
+            tree = target.parent()
+            while tree is not None and tree.element_info.control_type != "Tree":
+                tree = tree.parent()
+            if tree is None:
+                raise RuntimeError(f"Cannot locate the favorites tree for {name}")
+            bounds, viewport = target.rectangle(), tree.rectangle()
         if (bounds.width() < 1 or bounds.height() < 1 or
                 not (viewport.left <= bounds.mid_point().x <= viewport.right and
                      viewport.top <= bounds.mid_point().y <= viewport.bottom)):

@@ -2,8 +2,8 @@
   "omapexepath": "D:/App/omap/omap.exe",
   "startup_timeout_seconds": 120,
   "plan_buffer_meters": 20.0,
-  "source_features": "D:/0-liaoliao/0-垫江业务/垫江业务申报数据/砚台镇/砚台镇村界/砚台镇村界.shp",
-  "export_dir": "ou2t/vip_parts_buffer202",
+  "source_features": "D:/0-liaoliao/0-郎酒新项目/优先10月播种名单/out2027/2027高粱行政区.gpkg",
+  "export_dir": "out2/vip_parts_buffer202",
   "mosaic_dir": "out2/features_z18_buffer202",
   "zoom": 18,
   "format": "tif",
@@ -62,6 +62,6 @@
     }
   ],
   "basemap_checked_year": 2026,
-  "basemap_id": "tianditu_imagery",
-  "basemap_resolved_label": "天地图影像"
+  "basemap_id": "jilin_national",
+  "basemap_resolved_label": "吉林一号卫星图(全国2025)"
 }
