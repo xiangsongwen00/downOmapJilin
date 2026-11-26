@@ -40,4 +40,6 @@ rem Update binaries without deleting downloaded TIFs, ledgers, or edited config.
 robocopy "build\msvc\staging\index.dist" "build\msvc\index.dist" /E /XF config.json /NFL /NDL /NJH /NJS /NP
 if errorlevel 8 exit /b %errorlevel%
 if not exist "build\msvc\index.dist\config.json" copy /Y "build\msvc\staging\index.dist\config.json" "build\msvc\index.dist\config.json" >nul
+python tools\package_release.py
+if errorlevel 1 exit /b %errorlevel%
 exit /b 0

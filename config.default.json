@@ -1,0 +1,18 @@
+{
+  "omapexepath": "",
+  "source_features": "",
+  "export_dir": "out2/vip_parts",
+  "mosaic_dir": "out2/features_z18",
+  "state_file": "out2/ovi_pipeline_state.json",
+  "lock_file": "out2/ovi_pipeline.lock",
+  "startup_timeout_seconds": 120,
+  "export_timeout_seconds": 900,
+  "download_timeout_seconds": 900,
+  "max_attempts": 3,
+  "plan_buffer_meters": 20,
+  "zoom": 18,
+  "format": "tif",
+  "coordinate_system": "default",
+  "mosaic": true,
+  "basemap_menu": []
+}
