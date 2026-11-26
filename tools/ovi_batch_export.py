@@ -136,9 +136,13 @@ def _native_folders(window, folder_name):
 
 def imported_folder(window, folder_name, expected_names, timeout=15,
                     wait_for_absent=False):
-    folders = [c for c in window.descendants(control_type="TreeItem")
-               if c.window_text() == folder_name]
     native_folders = _native_folders(window, folder_name)
+    for folder in native_folders:
+        if expected_names.issubset({item.text() for item in folder.sub_elements()}):
+            return folder
+    folders = [] if native_folders else [
+        c for c in window.descendants(control_type="TreeItem")
+        if c.window_text() == folder_name]
     if not folders and not native_folders and not wait_for_absent:
         return None
     def ready_folder():
@@ -200,10 +204,20 @@ def property_menu_item():
     return found[0][1] if len(found) == 1 else None
 
 
-def grid_tree_item(window, folder_name, name, timeout=10):
+def grid_tree_item(window, folder_name, name, timeout=10, native_index=None):
     """Locate a grid by its ancestry, even when the folder row is scrolled away."""
     deadline = time.monotonic() + timeout
     visible_names = visible_folders = 0
+    if native_index and name in native_index:
+        matches = native_index[name]
+        if len(matches) > 1:
+            raise RuntimeError(f"Multiple {name} rows belong to {folder_name}")
+        try:
+            if matches[0].item.text() == name:
+                return matches[0]
+        except Exception:
+            pass  # Tree was rebuilt: fall back to a fresh lookup.
+        native_index.clear()
     while time.monotonic() < deadline:
         items = window.descendants(control_type="TreeItem")
         candidates = [item for item in items if item.window_text() == name]
@@ -239,17 +253,17 @@ def grid_tree_item(window, folder_name, name, timeout=10):
         f"(visible names: {visible_names}, visible folders: {visible_folders})")
 
 
-def open_property(window, name, folder_name):
+def open_property(window, name, folder_name, native_index=None):
     maximize(window)
     for _ in range(3):
         send_keys("{ESC}")
-        target = grid_tree_item(window, folder_name, name)
+        target = grid_tree_item(window, folder_name, name, native_index=native_index)
         if isinstance(target, _NativeTreeItem):
             target.item.ensure_visible()
         else:
             target.iface_scroll_item.ScrollIntoView()
         time.sleep(0.3)
-        target = grid_tree_item(window, folder_name, name)
+        target = grid_tree_item(window, folder_name, name, native_index=native_index)
         if isinstance(target, _NativeTreeItem):
             bounds = target.item.client_rect()
             viewport = target.item.tree_ctrl.client_rect()
@@ -518,12 +532,14 @@ def verify_tif(path, feature=None):
             if coverage < 0.995:
                 raise RuntimeError(f"Incomplete TIF coverage {coverage:.2%}: {path}")
             result["coverage"] = round(coverage, 6)
+        result["mtime_ns"] = path.stat().st_mtime_ns
         return result
 
 
-def export_one(window, feature, destination, timeout, download_timeout, folder_name):
+def export_one(window, feature, destination, timeout, download_timeout, folder_name,
+               native_index=None):
     name = feature["properties"]["name"]
-    props = open_property(window, name, folder_name)
+    props = open_property(window, name, folder_name, native_index=native_index)
     button(props, "高级").click_input()
     advanced = wait_until(lambda: child_dialog(window, "图形高级功能"))
     button(advanced, "导出成图片").click_input()
@@ -572,6 +588,68 @@ def export_one(window, feature, destination, timeout, download_timeout, folder_n
     return result
 
 
+def checkpoint_matches(path, record):
+    """Trust prior coverage validation while the recorded file is unchanged.
+
+    Older ledgers have no timestamp; their verified coverage and byte size
+    provide the migration path without rereading every raster on first resume.
+    The caller must first check the ledger's plan and basemap identity.
+    """
+    if not record or record.get("coverage", 0) < 0.995:
+        return False
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return (stat.st_size >= 4096 and stat.st_size == record.get("bytes")
+            and ("mtime_ns" not in record or stat.st_mtime_ns == record["mtime_ns"]))
+
+
+def resume_exports(features, output_dir, ledger_path, ledger):
+    """Scan local checkpoints before touching Ovi; validate only new/changed files."""
+    started = time.monotonic()
+    pending = []
+    skipped = adopted = changed = 0
+    for index, feature in enumerate(features, 1):
+        name = feature["properties"]["name"]
+        path = output_dir / f"{name}.tif"
+        record = ledger["completed"].get(name)
+        if checkpoint_matches(path, record):
+            # Pin legacy checkpoints to their current timestamp for future runs.
+            if "mtime_ns" not in record:
+                record["mtime_ns"] = path.stat().st_mtime_ns
+                changed += 1
+            skipped += 1
+        elif path.is_file():
+            print(f"Resume: checking new/changed TIF [{index}/{len(features)}] {name}", flush=True)
+            try:
+                ledger["completed"][name] = verify_tif(path, feature)
+            except (OSError, RuntimeError) as exc:
+                ledger["completed"].pop(name, None)
+                pending.append((index, feature))
+                print(f"  needs export: {exc}", flush=True)
+            else:
+                adopted += 1
+            changed += 1
+        else:
+            if name in ledger["completed"]:
+                del ledger["completed"][name]
+                changed += 1
+            pending.append((index, feature))
+        if changed >= 25:
+            write_ledger(ledger_path, ledger)
+            changed = 0
+        if index % 100 == 0:
+            print(f"Resume scan: {index}/{len(features)}; fast skipped: {skipped}; "
+                  f"validated: {adopted}; pending: {len(pending)}", flush=True)
+    if changed:
+        write_ledger(ledger_path, ledger)
+    print(f"Resume ready in {time.monotonic() - started:.2f}s: "
+          f"fast skipped: {skipped}; validated: {adopted}; "
+          f"pending: {len(pending)}/{len(features)}", flush=True)
+    return pending
+
+
 def run(args):
     choice = getattr(args, "basemap", None)
     if choice is None:
@@ -600,6 +678,12 @@ def run(args):
         if any(args.output.glob("*.tif")):
             raise RuntimeError("Existing TIFs have no basemap ledger; use a separate output directory")
         ledger = {"plan_sha256": plan_hash, "basemap_key": choice.key, "completed": {}}
+    pending = resume_exports(features, args.output, ledger_path, ledger)
+    if not pending:
+        return
+    ensure_running = getattr(args, "ensure_running", None)
+    if ensure_running is not None:
+        ensure_running()
     window = main_window()
     maximize(window)
     recover_ui(window)
@@ -610,31 +694,17 @@ def run(args):
     else:
         print(f"Target tree already exists: {folder_name}; reusing", flush=True)
     print(f"Grid import ready: {folder_name}; planned exports: {len(features)}", flush=True)
+    native_index = {}
+    for folder in _native_folders(window, folder_name):
+        for item in folder.sub_elements():
+            native_index.setdefault(item.text(), []).append(_NativeTreeItem(item))
     from tools.ovi_basemap import ensure_basemap
 
     ensure_basemap(window, choice)
     print(f"Basemap selected: {choice.label}", flush=True)
-    for index, feature in enumerate(features, 1):
+    for index, feature in pending:
         name = feature["properties"]["name"]
         output = args.output / f"{name}.tif"
-        if name in ledger["completed"] and output.is_file():
-            try:
-                verify_tif(output, feature)
-            except Exception as exc:
-                print(f"[{index}/{len(features)}] existing TIF invalid: {exc}", flush=True)
-            else:
-                print(f"[{index}/{len(features)}] skip verified {name}", flush=True)
-                continue
-        if output.is_file():
-            try:
-                existing = verify_tif(output, feature)
-            except RuntimeError:
-                pass
-            else:
-                ledger["completed"][name] = existing
-                write_ledger(ledger_path, ledger)
-                print(f"[{index}/{len(features)}] adopt verified {name}", flush=True)
-                continue
         result = None
         for attempt in range(1, getattr(args, "max_attempts", 3) + 1):
             try:
@@ -643,7 +713,7 @@ def run(args):
                 archive_existing(output)
                 print(f"[{index}/{len(features)}] exporting {name}; attempt {attempt}", flush=True)
                 result = export_one(window, feature, output, args.timeout,
-                                    args.download_timeout, folder_name)
+                                    args.download_timeout, folder_name, native_index=native_index)
                 break
             except Exception as exc:
                 print(f"[{index}/{len(features)}] attempt {attempt} failed: {exc}", flush=True)

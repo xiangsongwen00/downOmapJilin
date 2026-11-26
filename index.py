@@ -210,6 +210,8 @@ def _seed_compatible_exports(current_plan, output_dir, previous_plans, basemap_k
         raise RuntimeError(f"New export directory belongs to another target: {output_dir}")
     completed = dict(ledger.get("completed", {}))
     for previous_plan, previous_dir in previous_plans:
+        if set(current).issubset(completed):
+            break
         if previous_plan == current_plan or not previous_plan.is_file() or not previous_dir.is_dir():
             continue
         old = json.loads(previous_plan.read_text(encoding="utf-8"))["features"]
@@ -337,7 +339,6 @@ def run(config, check_only=False, prepare_only=False, mosaic_only=False):
         return
 
     if not mosaic_only:
-        ensure_ovi_running(config)
         from tools.ovi_batch_export import run as export_all
         report(config, "exporting", target=str(target), completed=completed, total=len(features))
         export_all(SimpleNamespace(
@@ -346,13 +347,26 @@ def run(config, check_only=False, prepare_only=False, mosaic_only=False):
             download_timeout=int(config.get("download_timeout_seconds", 900)),
             max_attempts=int(config.get("max_attempts", 3)),
             basemap=choice,
+            ensure_running=lambda: ensure_ovi_running(config),
         ))
-    from tools.ovi_batch_export import verify_tif
+    from tools.ovi_batch_export import checkpoint_matches, verify_tif
+    # The exporter has just validated new files and saved their checkpoints.
+    # Do not reread every alpha band a second time before mosaicking.
+    ledger = json.loads(ledger_file.read_text(encoding="utf-8")) if ledger_file.exists() else {}
+    if not ledger:
+        ledger = {"plan_sha256": plan_hash, "basemap_key": choice.key, "completed": {}}
+    updated = False
     rasters = []
     for feature in features:
         path = export_dir / f"{feature['properties']['name']}.tif"
-        verify_tif(path, feature)
+        name = feature["properties"]["name"]
+        if not checkpoint_matches(path, ledger.get("completed", {}).get(name)):
+            result = verify_tif(path, feature)
+            ledger.setdefault("completed", {})[name] = result
+            updated = True
         rasters.append(path)
+    if updated:
+        atomic_json(ledger_file, ledger)
     report(config, "exports_complete", count=len(rasters))
 
     if config.get("mosaic", True):

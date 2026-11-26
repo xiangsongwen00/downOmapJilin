@@ -101,17 +101,19 @@ class BasemapTests(unittest.TestCase):
         events = []
         with tempfile.TemporaryDirectory() as temporary:
             plan = Path(temporary) / "grid.geojson"
-            plan.write_text(json.dumps({"features": []}), encoding="utf-8")
+            plan.write_text(json.dumps({"features": [{"properties": {"name": "part", "zoom": 18}}]}), encoding="utf-8")
             args = SimpleNamespace(plan=plan, output=Path(temporary) / "parts",
-                                   only=None, limit=None, basemap=choice)
+                                   only=None, limit=None, basemap=choice,
+                                   timeout=900, download_timeout=900)
             with (patch("tools.ovi_batch_export.main_window", return_value=object()),
                   patch("tools.ovi_batch_export.maximize"),
                   patch("tools.ovi_batch_export.recover_ui"),
+                  patch("tools.ovi_batch_export.export_one", return_value={}),
                   patch("tools.ovi_batch_export.imported_folder", return_value=None),
                   patch("tools.ovi_batch_export.import_plan", side_effect=lambda *a: events.append("import")),
                   patch("tools.ovi_basemap.ensure_basemap", side_effect=lambda *a: events.append("switch"))):
                 export_run(args)
-        self.assertEqual(events, ["import", "switch"])
+        self.assertEqual(events, ["import", "switch", "switch"])
 
     def test_existing_ledger_cannot_be_reused_for_another_map(self):
         with tempfile.TemporaryDirectory() as temporary:

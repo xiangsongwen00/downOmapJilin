@@ -81,6 +81,21 @@ class GridLookupTests(unittest.TestCase):
         window = SimpleNamespace(handle=123)
         self.assertEqual(_native_folders(window, "current[5]"), [folder])
 
+    def test_cached_native_row_does_not_enumerate_uia_or_native_tree(self):
+        target = _NativeTreeItem(NativeItem("part_01"))
+        window = Mock()
+        window.descendants.side_effect = AssertionError("full UIA scan")
+        with patch("tools.ovi_batch_export._native_folders", side_effect=AssertionError("full native scan")):
+            self.assertIs(grid_tree_item(window, "current[5]", "part_01",
+                                         native_index={"part_01": [target]}), target)
+
+    def test_stale_native_index_falls_back_to_fresh_lookup(self):
+        current = Item("part_01", Item("current[5]"))
+        cache = {"part_01": [_NativeTreeItem(NativeItem("renamed"))]}
+        self.assertIs(grid_tree_item(Window([current]), "current[5]", "part_01",
+                                     native_index=cache), current)
+        self.assertEqual(cache, {})
+
     def test_native_lookup_ignores_hidden_import_preview(self):
         self.native_tree(NativeItem("current[5]"), visible=False)
         self.assertEqual(_native_folders(SimpleNamespace(handle=123), "current[5]"), [])
