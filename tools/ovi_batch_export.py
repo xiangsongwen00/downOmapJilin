@@ -29,6 +29,10 @@ from affine import Affine
 from rasterio.features import geometry_mask
 from shapely.geometry import mapping, shape
 from shapely.ops import transform as transform_geom
+from src.windows_runtime import prepare_comtypes
+
+prepare_comtypes()
+
 from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
 import win32con

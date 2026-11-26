@@ -22,12 +22,18 @@ python -m nuitka ^
   --include-package=rasterio ^
   --include-package=comtypes ^
   --include-package=pywinauto ^
+  --nofollow-import-to=comtypes.gen.* ^
+  --nofollow-import-to=comtypes.test ^
   --report=build\msvc\compilation-report.xml ^
   --output-dir=build\msvc\staging ^
   --output-filename=jinlinOmap.exe ^
   --jobs=4 ^
   --assume-yes-for-downloads ^
   index.py
+if errorlevel 1 exit /b %errorlevel%
+
+rem Check GIS and COM before publishing the new executable.
+"build\msvc\staging\index.dist\jinlinOmap.exe" --diagnose
 if errorlevel 1 exit /b %errorlevel%
 
 rem Update binaries without deleting downloaded TIFs, ledgers, or edited config.

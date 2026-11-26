@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import time
 
+from src.windows_runtime import prepare_comtypes
+
+prepare_comtypes()
+
 from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
 

@@ -22,17 +22,9 @@ from types import SimpleNamespace
 PACKAGED = "__compiled__" in globals()
 EXECUTABLE = Path(sys.argv[0]).resolve() if PACKAGED else Path(sys.executable).resolve()
 ROOT = EXECUTABLE.parent if PACKAGED else Path(__file__).resolve().parent
-DLL_HANDLES = []
-if PACKAGED and os.name == "nt":
-    dll_directories = [ROOT / name for name in ("pyogrio.libs", "rasterio.libs")]
-    dll_directories = [path for path in dll_directories if path.is_dir()]
-    os.environ["PATH"] = os.pathsep.join(
-        [*(str(path) for path in dll_directories), os.environ.get("PATH", "")])
-    DLL_HANDLES = [os.add_dll_directory(str(path)) for path in dll_directories]
-    proj_directory = ROOT / "pyproj" / "proj_dir" / "share" / "proj"
-    if proj_directory.is_dir():
-        os.environ["PROJ_LIB"] = str(proj_directory)
-        os.environ["PROJ_DATA"] = str(proj_directory)
+from src.windows_runtime import configure_environment
+
+configure_environment(ROOT, PACKAGED)
 
 
 def project_path(value, base=ROOT):
@@ -408,14 +400,21 @@ def run(config, check_only=False, prepare_only=False, mosaic_only=False):
 
 
 def main():
+    from src.windows_runtime import configure_console, configure_dpi, diagnose
+
+    configure_console()
+    configure_dpi()
     parser = argparse.ArgumentParser(description="Resume configured Ovi level-18 TIF exports")
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
     action = parser.add_mutually_exclusive_group()
+    action.add_argument("--diagnose", action="store_true", help="Check portable GIS/COM runtime without downloading")
     action.add_argument("--check", action="store_true", help="Validate configuration and current ledger without UI")
     action.add_argument("--prepare", action="store_true", help="Prepare importable target without UI")
     action.add_argument("--mosaic-only", action="store_true", help="Rebuild final feature TIFs from existing exports without Ovi")
     action.add_argument("--run", action="store_true", help="Run the configured export without opening the settings window")
     args = parser.parse_args()
+    if args.diagnose:
+        return diagnose(ROOT, PACKAGED)
     config_path = args.config.resolve()
     if not (args.check or args.prepare or args.mosaic_only or args.run):
         from src.config_gui import launch_gui
